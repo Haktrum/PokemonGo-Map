@@ -4,11 +4,12 @@ import logging
 import calendar
 import sys
 import gc
+import json
 import time
 import geopy
 from peewee import SqliteDatabase, InsertQuery, \
     IntegerField, CharField, DoubleField, BooleanField, \
-    DateTimeField, fn, DeleteQuery, CompositeKey, FloatField
+    DateTimeField, fn, DeleteQuery, CompositeKey, FloatField, SQL
 from playhouse.flask_utils import FlaskDB
 from playhouse.pool import PooledMySQLDatabase
 from playhouse.shortcuts import RetryOperationalError
@@ -218,24 +219,63 @@ class Pokemon(BaseModel):
         return list(query)
 
     @classmethod
+    def get_spawn_time(cls, disappear_time):
+        return (disappear_time + 2700) % 3600
+
+    @classmethod
     def get_spawnpoints(cls, southBoundary, westBoundary, northBoundary, eastBoundary):
-        query = Pokemon.select(Pokemon.latitude, Pokemon.longitude, Pokemon.spawnpoint_id)
+        locations = []
+        # Attempt to load spawns from file
+        if args.spawnpoint_scanning and args.spawnpoint_scanning != 'nofile':
+            try:
+                with open(args.spawnpoint_scanning) as file:
+                    locations = json.load(file)
+                    if 'spawnpoint_id' in locations[0]:
+                        locations = [{'latitude': l['lat'], 'longitude': l['lng'], 'spawnpoint_id': l['spawnpoint_id'], 'time': l['time']} for l in locations]
+                    elif 'sid' in locations[0]:
+                        locations = [{'latitude': l['lat'], 'longitude': l['lng'], 'spawnpoint_id': l['sid'], 'time': l['time']} for l in locations]
+            except ValueError as e:
+                log.exception(e)
+                log.error('JSON error: %s; will fallback to database', e)
+            except IOError as e:
+                log.error('Error opening json file: %s; will fallback to database', e)
 
-        if None not in (northBoundary, southBoundary, westBoundary, eastBoundary):
-            query = (query
-                     .where((Pokemon.latitude <= northBoundary) &
-                            (Pokemon.latitude >= southBoundary) &
-                            (Pokemon.longitude >= westBoundary) &
-                            (Pokemon.longitude <= eastBoundary)
-                            ))
+        if not len(locations):
+            query = Pokemon.select(Pokemon.latitude, Pokemon.longitude, Pokemon.spawnpoint_id, ((Pokemon.disappear_time.minute * 60) + Pokemon.disappear_time.second).alias('time'), fn.Count(Pokemon.spawnpoint_id).alias('count'))
 
-        # Sqlite doesn't support distinct on columns
-        if args.db_type == 'mysql':
-            query = query.distinct(Pokemon.spawnpoint_id)
-        else:
-            query = query.group_by(Pokemon.spawnpoint_id)
+            if None not in (northBoundary, southBoundary, westBoundary, eastBoundary):
+                query = (query
+                         .where((Pokemon.latitude <= northBoundary) &
+                                (Pokemon.latitude >= southBoundary) &
+                                (Pokemon.longitude >= westBoundary) &
+                                (Pokemon.longitude <= eastBoundary)
+                                ))
 
-        return list(query.dicts())
+            query = query.group_by(Pokemon.latitude, Pokemon.longitude, Pokemon.spawnpoint_id, SQL('time'))
+
+            queryDict = query.dicts()
+            spawnpoints = {}
+
+            for sp in queryDict:
+                key = sp['spawnpoint_id']
+                disappear_time = cls.get_spawn_time(sp.pop('time'))
+                count = int(sp['count'])
+
+                if key not in spawnpoints:
+                    spawnpoints[key] = sp
+                else:
+                    spawnpoints[key]['special'] = True
+
+                if 'time' not in spawnpoints[key] or count >= spawnpoints[key]['count']:
+                    spawnpoints[key]['time'] = disappear_time
+                    spawnpoints[key]['count'] = count
+
+            for sp in spawnpoints.values():
+                del sp['count']
+
+            locations = list(spawnpoints.values())
+
+        return locations
 
     @classmethod
     def get_spawnpoints_in_hex(cls, center, steps):
@@ -278,7 +318,7 @@ class Pokemon(BaseModel):
             #           0       (   0 + 2700) = 2700 % 3600 = 2700 (0th minute to 45th minute, 15 minutes prior to appearance as time wraps around the hour)
             #           1800    (1800 + 2700) = 4500 % 3600 =  900 (30th minute, moved to arrive at 15th minute)
             # todo: this DOES NOT ACCOUNT for pokemons that appear sooner and live longer, but you'll _always_ have at least 15 minutes, so it works well enough
-            location['time'] = (location['time'] + 2700) % 3600
+            location['time'] = cls.get_spawn_time(location['time'])
 
         return filtered
 

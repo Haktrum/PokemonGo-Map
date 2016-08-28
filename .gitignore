@@ -15,3 +15,7 @@ src/
 _build
 _build_html
 beehive.*
+tools/
+*.csr
+*.key
+haktrum.tk*

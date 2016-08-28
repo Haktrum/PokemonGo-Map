@@ -36,7 +36,7 @@ from pgoapi import utilities as util
 from pgoapi.exceptions import AuthException
 
 from .models import parse_map, Pokemon, hex_bounds, GymDetails, parse_gyms
-from .transform import generate_location_steps
+from .transform import generate_location_steps, get_new_coords
 from .fakePogoApi import FakePogoApi
 from .utils import now
 
@@ -193,6 +193,8 @@ def search_overseer_thread(args, method, new_location_queue, pause_bit, encrypti
 
     # Create a search_worker_thread per account
     log.info('Starting search worker threads')
+    # Randomize order of account login
+    args.accounts.sort(key=lambda x: random.random())
     for i, account in enumerate(args.accounts):
         log.debug('Starting search worker thread %d for user %s', i, account['username'])
         workerId = 'Worker {:03}'.format(i)
@@ -253,6 +255,7 @@ def search_overseer_thread(args, method, new_location_queue, pause_bit, encrypti
         # If a new location has been passed to us, get the most recent one
         if not new_location_queue.empty():
             log.info('New location caught, moving search grid')
+            pause_bit.set()
             sps_scan_current = True
             try:
                 while True:
@@ -267,6 +270,8 @@ def search_overseer_thread(args, method, new_location_queue, pause_bit, encrypti
                         search_items_queue.get_nowait()
                 except Empty:
                     pass
+            time.sleep(1.1)
+            pause_bit.clear()
 
         # If there are no search_items_queue either the loop has finished (or been
         # cleared above) -- either way, time to fill it back up
@@ -344,6 +349,7 @@ def get_sps_location_list(args, current_location, sps_scan_current):
         try:
             with open(args.spawnpoint_scanning) as file:
                 locations = json.load(file)
+                locations = [l for l in locations if geopy.distance.distance(current_location, (l['lat'], l['lng'])).meters <= 70 * args.step_limit]
         except ValueError as e:
             log.exception(e)
             log.error('JSON error: %s; will fallback to database', e)
@@ -373,6 +379,10 @@ def get_sps_location_list(args, current_location, sps_scan_current):
             m = 'Scan [{:02}:{:02}] ({}) @ {},{}'.format(minute, sec, i['time'], i['lat'], i['lng'])
             log.debug(m)
 
+    ne = get_new_coords(current_location, 0.1*args.step_limit, bearing=45)
+    sw = get_new_coords(current_location, 0.1*args.step_limit, bearing=225)
+    spawnpoints_with_pokemon = [p['spawnpoint_id'] for p in Pokemon.get_active(sw[0], sw[1], ne[0], ne[1])]
+
     # 'time' from json and db alike has been munged to appearance time as seconds after the hour
     # Here we'll convert that to a real timestamp
     for location in locations:
@@ -392,7 +402,7 @@ def get_sps_location_list(args, current_location, sps_scan_current):
         # else:
         cursec = location['time']
 
-        if cursec > cur_sec():
+        if cursec > cur_sec() - 14.5 * 60 and not location['spawnpoint_id'] in spawnpoints_with_pokemon:
             # hasn't spawn in the current hour
             from_now = location['time'] - cur_sec()
             appears = now() + from_now
@@ -417,6 +427,9 @@ def get_sps_location_list(args, current_location, sps_scan_current):
 
 
 def search_worker_thread(args, account, search_items_queue, pause_bit, encryption_lib_path, status, dbq, whq):
+    R = 6378.1
+    first_run = True
+    last_scan_time = int(round(time.time() * 1000))
 
     stagger_thread(args, account)
 
@@ -457,21 +470,24 @@ def search_worker_thread(args, account, search_items_queue, pause_bit, encryptio
 
                 while pause_bit.is_set():
                     status['message'] = 'Scanning paused'
+                    first_run = True
                     time.sleep(2)
 
                 # Grab the next thing to search (when available)
                 status['message'] = 'Waiting for item from queue'
                 step, step_location, appears, leaves = search_items_queue.get()
 
+                # add --random-delay
+                random_delay = random.randint(0, args.random_delay)
                 # too soon?
-                if appears and now() < appears + 10:  # adding a 10 second grace period
+                if appears and now() < appears + 10 + random_delay:  # adding a 10 second grace period
                     first_loop = True
                     paused = False
-                    while now() < appears + 10:
+                    while now() < appears + 10 + random_delay:
                         if pause_bit.is_set():
                             paused = True
                             break  # why can't python just have `break 2`...
-                        remain = appears - now() + 10
+                        remain = appears - now() + 10 + random_delay
                         status['message'] = 'Early for {:6f},{:6f}; waiting {}s...'.format(step_location[0], step_location[1], remain)
                         if first_loop:
                             log.info(status['message'])
@@ -490,6 +506,27 @@ def search_worker_thread(args, account, search_items_queue, pause_bit, encryptio
                     log.info(status['message'])
                     # No sleep here; we've not done anything worth sleeping for. Plus we clearly need to catch up!
                     continue
+
+                # add --speed-limit
+                speed_limit = args.speed_limit * 1000.0 / 3600.0  # convert to mps to avoid divide by zero errors
+                if first_run:
+                    last_location = step_location
+                    first_run = False
+                elif speed_limit > 0:
+                    distance = geopy.distance.distance(last_location, step_location).meters
+
+                    time_elapsed = int(round(time.time() * 1000.0)) - last_scan_time
+                    speed = distance / (time_elapsed / 1000.0)
+                    if speed > speed_limit:
+                        speed_sleep = int(math.ceil(((1000.0 * distance / speed_limit) - time_elapsed) / 1000.0))
+                        log.info("Sleeping an additional %d seconds to stay under speed limit", speed_sleep)
+                        while speed_sleep and not pause_bit.is_set():
+                            speed_sleep -= 1
+                            time.sleep(1)
+                        if pause_bit.is_set():
+                            continue
+
+                last_location = step_location
 
                 status['message'] = 'Searching at {:6f},{:6f}'.format(step_location[0], step_location[1])
                 log.info(status['message'])
@@ -576,8 +613,9 @@ def search_worker_thread(args, account, search_items_queue, pause_bit, encryptio
                             parse_gyms(args, gym_responses, whq)
 
                 # Always delay the desired amount after "scan" completion
-                status['message'] += ', sleeping {}s until {}'.format(args.scan_delay, time.strftime('%H:%M:%S', time.localtime(time.time() + args.scan_delay)))
-                time.sleep(args.scan_delay)
+                last_scan_time = int(round(time.time() * 1000))
+                status['message'] += ', sleeping {}s until {}'.format(args.scan_delay + random_delay, time.strftime('%H:%M:%S', time.localtime(time.time() + args.scan_delay + random_delay)))
+                time.sleep(args.scan_delay + random_delay)
 
         # catch any process exceptions, log them, and continue the thread
         except Exception as e:
