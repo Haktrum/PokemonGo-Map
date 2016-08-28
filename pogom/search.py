@@ -470,6 +470,7 @@ def search_worker_thread(args, account, search_items_queue, pause_bit, encryptio
 
                 while pause_bit.is_set():
                     status['message'] = 'Scanning paused'
+                    first_run = True
                     time.sleep(2)
 
                 # Grab the next thing to search (when available)
@@ -512,22 +513,18 @@ def search_worker_thread(args, account, search_items_queue, pause_bit, encryptio
                     last_location = step_location
                     first_run = False
                 elif speed_limit > 0:
-                    lat1 = math.radians(last_location[0])
-                    lon1 = math.radians(last_location[1])
-                    lat2 = math.radians(step_location[0])
-                    lon2 = math.radians(step_location[1])
-                    dlon = lon2 - lon1
-                    dlat = lat2 - lat1
-                    a = math.sin(dlat / 2)**2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2)**2
-                    c2 = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-                    distance = R * c2 * 1000.0
+                    distance = geopy.distance.distance(last_location, step_location).meters
 
                     time_elapsed = int(round(time.time() * 1000.0)) - last_scan_time
                     speed = distance / (time_elapsed / 1000.0)
                     if speed > speed_limit:
                         speed_sleep = int(math.ceil(((1000.0 * distance / speed_limit) - time_elapsed) / 1000.0))
                         log.info("Sleeping an additional %d seconds to stay under speed limit", speed_sleep)
-                        time.sleep(speed_sleep)
+                        while speed_sleep and not pause_bit.is_set():
+                            speed_sleep -= 1
+                            time.sleep(1)
+                        if pause_bit.is_set():
+                            continue
 
                 last_location = step_location
 
