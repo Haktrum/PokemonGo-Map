@@ -36,7 +36,7 @@ from pgoapi import utilities as util
 from pgoapi.exceptions import AuthException
 
 from .models import parse_map, Pokemon, hex_bounds, GymDetails, parse_gyms
-from .transform import generate_location_steps
+from .transform import generate_location_steps, get_new_coords
 from .fakePogoApi import FakePogoApi
 from .utils import now
 

@@ -231,9 +231,9 @@ class Pokemon(BaseModel):
                 with open(args.spawnpoint_scanning) as file:
                     locations = json.load(file)
                     if 'spawnpoint_id' in locations[0]:
-                        locations = [{'latitude': l['lat'], 'longitude': l['lng'], 'spawnpoint_id': l['spawnpoint_id']} for l in locations]
+                        locations = [{'latitude': l['lat'], 'longitude': l['lng'], 'spawnpoint_id': l['spawnpoint_id'], 'time': l['time']} for l in locations]
                     elif 'sid' in locations[0]:
-                        locations = [{'latitude': l['lat'], 'longitude': l['lng'], 'spawnpoint_id': l['sid']} for l in locations]
+                        locations = [{'latitude': l['lat'], 'longitude': l['lng'], 'spawnpoint_id': l['sid'], 'time': l['time']} for l in locations]
             except ValueError as e:
                 log.exception(e)
                 log.error('JSON error: %s; will fallback to database', e)
