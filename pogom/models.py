@@ -4,6 +4,7 @@ import logging
 import calendar
 import sys
 import gc
+import json
 import time
 import geopy
 from peewee import SqliteDatabase, InsertQuery, \
@@ -219,23 +220,42 @@ class Pokemon(BaseModel):
 
     @classmethod
     def get_spawnpoints(cls, southBoundary, westBoundary, northBoundary, eastBoundary):
-        query = Pokemon.select(Pokemon.latitude, Pokemon.longitude, Pokemon.spawnpoint_id)
+        locations = []
+        # Attempt to load spawns from file
+        if args.spawnpoint_scanning and args.spawnpoint_scanning != 'nofile':
+            try:
+                with open(args.spawnpoint_scanning) as file:
+                    locations = json.load(file)
+                    if 'spawnpoint_id' in locations[0]:
+                        locations = [{'latitude': l['lat'], 'longitude': l['lng'], 'spawnpoint_id': l['spawnpoint_id']} for l in locations]
+                    elif 'sid' in locations[0]:
+                        locations = [{'latitude': l['lat'], 'longitude': l['lng'], 'spawnpoint_id': l['sid']} for l in locations]
+            except ValueError as e:
+                log.exception(e)
+                log.error('JSON error: %s; will fallback to database', e)
+            except IOError as e:
+                log.error('Error opening json file: %s; will fallback to database', e)
 
-        if None not in (northBoundary, southBoundary, westBoundary, eastBoundary):
-            query = (query
-                     .where((Pokemon.latitude <= northBoundary) &
-                            (Pokemon.latitude >= southBoundary) &
-                            (Pokemon.longitude >= westBoundary) &
-                            (Pokemon.longitude <= eastBoundary)
-                            ))
+        if not len(locations):
+            query = Pokemon.select(Pokemon.latitude, Pokemon.longitude, Pokemon.spawnpoint_id)
 
-        # Sqlite doesn't support distinct on columns
-        if args.db_type == 'mysql':
-            query = query.distinct(Pokemon.spawnpoint_id)
-        else:
-            query = query.group_by(Pokemon.spawnpoint_id)
+            if None not in (northBoundary, southBoundary, westBoundary, eastBoundary):
+                query = (query
+                         .where((Pokemon.latitude <= northBoundary) &
+                                (Pokemon.latitude >= southBoundary) &
+                                (Pokemon.longitude >= westBoundary) &
+                                (Pokemon.longitude <= eastBoundary)
+                                ))
 
-        return list(query.dicts())
+            # Sqlite doesn't support distinct on columns
+            if args.db_type == 'mysql':
+                query = query.distinct(Pokemon.spawnpoint_id)
+            else:
+                query = query.group_by(Pokemon.spawnpoint_id)
+
+            locations = list(query.dicts())
+
+        return locations
 
     @classmethod
     def get_spawnpoints_in_hex(cls, center, steps):

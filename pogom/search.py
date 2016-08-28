@@ -253,6 +253,7 @@ def search_overseer_thread(args, method, new_location_queue, pause_bit, encrypti
         # If a new location has been passed to us, get the most recent one
         if not new_location_queue.empty():
             log.info('New location caught, moving search grid')
+            pause_bit.set()
             sps_scan_current = True
             try:
                 while True:
@@ -267,6 +268,8 @@ def search_overseer_thread(args, method, new_location_queue, pause_bit, encrypti
                         search_items_queue.get_nowait()
                 except Empty:
                     pass
+            time.sleep(1.1)
+            pause_bit.clear()
 
         # If there are no search_items_queue either the loop has finished (or been
         # cleared above) -- either way, time to fill it back up
@@ -344,6 +347,7 @@ def get_sps_location_list(args, current_location, sps_scan_current):
         try:
             with open(args.spawnpoint_scanning) as file:
                 locations = json.load(file)
+                locations = [l for l in locations if geopy.distance.distance(current_location, (l['lat'], l['lng'])).meters <= 70 * args.step_limit]
         except ValueError as e:
             log.exception(e)
             log.error('JSON error: %s; will fallback to database', e)
@@ -373,6 +377,10 @@ def get_sps_location_list(args, current_location, sps_scan_current):
             m = 'Scan [{:02}:{:02}] ({}) @ {},{}'.format(minute, sec, i['time'], i['lat'], i['lng'])
             log.debug(m)
 
+    ne = get_new_coords(current_location, 0.1*args.step_limit, bearing=45)
+    sw = get_new_coords(current_location, 0.1*args.step_limit, bearing=225)
+    spawnpoints_with_pokemon = [p['spawnpoint_id'] for p in Pokemon.get_active(sw[0], sw[1], ne[0], ne[1])]
+
     # 'time' from json and db alike has been munged to appearance time as seconds after the hour
     # Here we'll convert that to a real timestamp
     for location in locations:
@@ -392,7 +400,7 @@ def get_sps_location_list(args, current_location, sps_scan_current):
         # else:
         cursec = location['time']
 
-        if cursec > cur_sec():
+        if cursec > cur_sec() - 14.5 * 60 and not location['spawnpoint_id'] in spawnpoints_with_pokemon:
             # hasn't spawn in the current hour
             from_now = location['time'] - cur_sec()
             appears = now() + from_now
