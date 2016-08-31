@@ -23,6 +23,7 @@ import json
 import os
 import random
 import time
+import datetime
 import geopy
 import geopy.distance
 
@@ -191,6 +192,18 @@ def search_overseer_thread(args, method, new_location_queue, pause_bit, encrypti
         t.daemon = True
         t.start()
 
+    for p in Pokemon.get_active(None, None, None, None):
+        wh_queue.put(('pokemon', {
+            'encounter_id': p['encounter_id'],
+            'spawnpoint_id': p['spawnpoint_id'],
+            'pokemon_id': p['pokemon_id'],
+            'latitude': p['latitude'],
+            'longitude': p['longitude'],
+            'disappear_time': (p['disappear_time']-datetime.datetime(1970,1,1)).total_seconds(),
+            'time_until_hidden_ms': (p['disappear_time'].minute * 60 + p['disappear_time'].second - cur_sec()) * 1000
+        }))
+
+
     # Create a search_worker_thread per account
     log.info('Starting search worker threads')
     # Randomize order of account login
@@ -270,6 +283,10 @@ def search_overseer_thread(args, method, new_location_queue, pause_bit, encrypti
                         search_items_queue.get_nowait()
                 except Empty:
                     pass
+            wh_queue.put(('location', {
+                        'latitude': current_location[0],
+                        'longitude': current_location[1]
+                    }))
             time.sleep(1.1)
             pause_bit.clear()
 
@@ -349,7 +366,8 @@ def get_sps_location_list(args, current_location, sps_scan_current):
         try:
             with open(args.spawnpoint_scanning) as file:
                 locations = json.load(file)
-                locations = [l for l in locations if geopy.distance.distance(current_location, (l['lat'], l['lng'])).meters <= 70 * args.step_limit]
+                if args.step_limit > 0:
+                    locations = [l for l in locations if geopy.distance.distance(current_location, (l['lat'], l['lng'])).meters <= 70 * args.step_limit]
         except ValueError as e:
             log.exception(e)
             log.error('JSON error: %s; will fallback to database', e)
