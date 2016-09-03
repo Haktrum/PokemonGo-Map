@@ -27,6 +27,7 @@ import datetime
 import geopy
 import geopy.distance
 
+from datetime import datetime
 from operator import itemgetter
 from threading import Thread
 from queue import Queue, Empty
@@ -36,7 +37,7 @@ from pgoapi.utilities import f2i
 from pgoapi import utilities as util
 from pgoapi.exceptions import AuthException
 
-from .models import parse_map, Pokemon, hex_bounds, GymDetails, parse_gyms
+from .models import parse_map, Pokemon, hex_bounds, GymDetails, parse_gyms, MainWorker, WorkerStatus
 from .transform import generate_location_steps, get_new_coords
 from .fakePogoApi import FakePogoApi
 from .utils import now
@@ -170,6 +171,38 @@ def status_printer(threadStatus, search_items_queue, db_updates_queue, wh_queue)
         time.sleep(1)
 
 
+def worker_status_db_thread(threads_status, name, db_updates_queue):
+    log.info("Clearing previous statuses for '%s' worker", name)
+    WorkerStatus.delete().where(WorkerStatus.worker_name == name).execute()
+
+    while True:
+        workers = {}
+        overseer = None
+        for status in threads_status.values():
+            if status['type'] == 'Overseer':
+                overseer = {
+                    'worker_name': name,
+                    'message': status['message'],
+                    'method': status['method'],
+                    'last_modified': datetime.utcnow()
+                }
+            if status['type'] == 'Worker':
+                workers[status['user']] = {
+                    'username': status['user'],
+                    'worker_name': name,
+                    'success': status['success'],
+                    'fail': status['fail'],
+                    'no_items': status['noitems'],
+                    'skip': status['skip'],
+                    'last_modified': datetime.utcnow(),
+                    'message': status['message']
+                }
+        if overseer is not None:
+            db_updates_queue.put((MainWorker, {0: overseer}))
+            db_updates_queue.put((WorkerStatus, workers))
+        time.sleep(3)
+
+
 # The main search loop that keeps an eye on the over all process
 def search_overseer_thread(args, method, new_location_queue, pause_bit, encryption_lib_path, db_updates_queue, wh_queue):
 
@@ -203,6 +236,13 @@ def search_overseer_thread(args, method, new_location_queue, pause_bit, encrypti
             'time_until_hidden_ms': (p['disappear_time'].minute * 60 + p['disappear_time'].second - cur_sec()) * 1000
         }))
 
+    if args.status_name is not None:
+        log.info('Starting status database thread')
+        t = Thread(target=worker_status_db_thread,
+                   name='status_worker_db',
+                   args=(threadStatus, args.status_name, db_updates_queue))
+        t.daemon = True
+        t.start()
 
     # Create a search_worker_thread per account
     log.info('Starting search worker threads')
