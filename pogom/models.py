@@ -9,7 +9,7 @@ import time
 import geopy
 from peewee import SqliteDatabase, InsertQuery, \
     IntegerField, CharField, DoubleField, BooleanField, \
-    DateTimeField, fn, DeleteQuery, CompositeKey, FloatField, SQL
+    DateTimeField, fn, DeleteQuery, CompositeKey, FloatField, SQL, TextField
 from playhouse.flask_utils import FlaskDB
 from playhouse.pool import PooledMySQLDatabase
 from playhouse.shortcuts import RetryOperationalError
@@ -19,7 +19,7 @@ from base64 import b64encode
 
 from . import config
 from .utils import get_pokemon_name, get_pokemon_rarity, get_pokemon_types, get_args
-from .transform import transform_from_wgs_to_gcj, get_new_coords, generate_location_steps
+from .transform import transform_from_wgs_to_gcj, get_new_coords
 from .customLog import printPokemon
 
 log = logging.getLogger(__name__)
@@ -27,7 +27,7 @@ log = logging.getLogger(__name__)
 args = get_args()
 flaskDb = FlaskDB()
 
-db_schema_version = 6
+db_schema_version = 7
 
 
 class MyRetryDB(RetryOperationalError, PooledMySQLDatabase):
@@ -302,15 +302,16 @@ class Pokemon(BaseModel):
 
         s = list(query.dicts())
 
-        # Filter to spawns which actually fall in the hex locations
-        # This loop is about as non-pythonic as you can get, I bet.
-        # Oh well.
+        # The distance between scan circles of radius 70 in a hex is 121.2436
+        # steps - 1 to account for the center circle then add 70 for the edge
+        step_distance = ((steps - 1) * 121.2436) + 70
+        # Compare spawnpoint list to a circle with radius steps * 120
+        # Uses the direct geopy distance between the center and the spawnpoint.
         filtered = []
-        hex_locations = list(generate_location_steps(center, steps, 0.07))
-        for hl in hex_locations:
-            for idx, sp in enumerate(s):
-                if geopy.distance.distance(hl, (sp['lat'], sp['lng'])).meters <= 70:
-                    filtered.append(s.pop(idx))
+
+        for idx, sp in enumerate(s):
+            if geopy.distance.distance(center, (sp['lat'], sp['lng'])).meters <= step_distance:
+                filtered.append(s[idx])
 
         # at this point, 'time' is DISAPPEARANCE time, we're going to morph it to APPEARANCE time
         for location in filtered:
@@ -465,6 +466,7 @@ class ScannedLocation(BaseModel):
                         (ScannedLocation.longitude >= swLng) &
                         (ScannedLocation.latitude <= neLat) &
                         (ScannedLocation.longitude <= neLng))
+                 .order_by(ScannedLocation.last_modified.asc())
                  .dicts())
 
         return list(query)
@@ -550,7 +552,7 @@ class Trainer(BaseModel):
 class GymDetails(BaseModel):
     gym_id = CharField(primary_key=True, max_length=50)
     name = CharField()
-    description = CharField(null=True)
+    description = TextField(null=True, default="")
     url = CharField()
     last_scanned = DateTimeField(default=datetime.utcnow)
 
@@ -879,6 +881,12 @@ def clean_db_loop(args):
                              (datetime.utcnow() - timedelta(minutes=30)))))
             query.execute()
 
+            # Remove active modifier from expired lured pokestops
+            query = (Pokestop
+                     .update(lure_expiration=None)
+                     .where(Pokestop.lure_expiration < datetime.utcnow()))
+            query.execute()
+
             # If desired, clear old pokemon spawns
             if args.purge_data > 0:
                 query = (Pokemon
@@ -989,4 +997,10 @@ def database_migrate(db, old_ver):
     if old_ver < 6:
         migrate(
             migrator.add_column('gym', 'last_scanned', DateTimeField(null=True)),
+        )
+
+    if old_ver < 7:
+        migrate(
+            migrator.drop_column('gymdetails', 'description'),
+            migrator.add_column('gymdetails', 'description', TextField(null=True, default=""))
         )
